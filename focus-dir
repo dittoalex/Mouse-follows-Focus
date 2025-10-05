@@ -1,0 +1,108 @@
+#!/usr/bin/env -vS bash -x
+# ~/.local/bin/focus-dir
+# Usage: focus-dir right|left|up|down
+# GNOME (Xorg) directional focus + mouse-center without relying on extension hotkeys.
+# Requires: wmctrl, xdotool
+
+set -euo pipefail
+
+dir="${1:-}"
+[[ "$dir" =~ ^(right|left|up|down)$ ]] || { echo "need right|left|up|down"; exit 2; }
+
+# ---- helpers ---------------------------------------------------------------
+
+center_pointer_on_active() {
+  local wid
+  wid=$(xdotool getactivewindow) || return 0
+  eval "$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null)" || return 0
+  # Move relative to the active window
+  xdotool mousemove --sync -w "$wid" $((WIDTH/2)) $((HEIGHT/2))
+}
+
+# integer overlap length of two 1D segments [a1,a2] and [b1,b2]
+overlap_len() {
+  local a1="$1" a2="$2" b1="$3" b2="$4"
+  local start end len
+  start=$(( a1 > b1 ? a1 : b1 ))
+  end=$(( a2 < b2 ? a2 : b2 ))
+  len=$(( end - start ))
+  (( len < 0 )) && len=0
+  echo "$len"
+}
+
+# ---- active window + workspace --------------------------------------------
+
+active_dec=$(xdotool getactivewindow) || exit 0
+eval "$(xdotool getwindowgeometry --shell "$active_dec" 2>/dev/null)" || exit 0
+ax=$X; ay=$Y; aw=$WIDTH; ah=$HEIGHT
+acx=$((ax + aw/2)); acy=$((ay + ah/2))
+
+desk=$(xprop -id "$active_dec" _NET_WM_DESKTOP | awk '{print $3}')
+
+# ---- find best candidate in the requested direction -----------------------
+
+best_hex=""
+best_score=9223372036854775807  # "infinity" for bash ints
+min_overlap_frac=25              # require >=25% overlap on perpendicular axis
+
+# wmctrl -lG -> HEX_ID DESK X Y W H HOST TITLE...
+while read -r wid_hex d wx wy ww wh _rest; do
+  # Stay on the same workspace; allow sticky (-1)
+  [[ "$d" == "$desk" || "$d" == "-1" ]] || continue
+
+  # Convert to decimal for xdotool comparisons and skip self
+  wid_dec=$((wid_hex))
+  [[ "$wid_dec" -eq "$active_dec" ]] && continue
+
+  wcx=$((wx + ww/2)); wcy=$((wy + wh/2))
+  dx=$((wcx - acx)); dy=$((wcy - acy))
+
+  case "$dir" in
+    right)
+      # strictly to the right of active center
+      (( dx <= 0 )) && continue
+      # vertical overlap requirement
+      ov=$(overlap_len "$ay" "$((ay+ah))" "$wy" "$((wy+wh))")
+      min_needed=$(( (ah < wh ? ah : wh) * min_overlap_frac / 100 ))
+      (( ov < min_needed )) && continue
+      score=$dx
+      ;;
+    left)
+      (( dx >= 0 )) && continue
+      ov=$(overlap_len "$ay" "$((ay+ah))" "$wy" "$((wy+wh))")
+      min_needed=$(( (ah < wh ? ah : wh) * min_overlap_frac / 100 ))
+      (( ov < min_needed )) && continue
+      score=$((-dx))
+      ;;
+    down)
+      (( dy <= 0 )) && continue
+      ov=$(overlap_len "$ax" "$((ax+aw))" "$wx" "$((wx+ww))")
+      min_needed=$(( (aw < ww ? aw : ww) * min_overlap_frac / 100 ))
+      (( ov < min_needed )) && continue
+      score=$dy
+      ;;
+    up)
+      (( dy >= 0 )) && continue
+      ov=$(overlap_len "$ax" "$((ax+aw))" "$wx" "$((wx+ww))")
+      min_needed=$(( (aw < ww ? aw : ww) * min_overlap_frac / 100 ))
+      (( ov < min_needed )) && continue
+      score=$((-dy))
+      ;;
+  esac
+
+  if (( score < best_score )); then
+    best_score=$score
+    best_hex="$wid_hex"  # keep hex for wmctrl -i
+  fi
+done < <(wmctrl -lG)
+
+# ---- focus + center --------------------------------------------------------
+
+if [[ -n "$best_hex" ]]; then
+  wmctrl -ia "$best_hex"          # focus/raise chosen window (wmctrl expects HEX)
+  sleep 0.03                      # tiny settle so GNOME updates active window
+  center_pointer_on_active        # re-query and center on the *actual* active
+else
+  # Nothing in that direction — just center on current to make behavior predictable
+  center_pointer_on_active
+fi
