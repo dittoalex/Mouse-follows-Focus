@@ -1,4 +1,4 @@
-#!/usr/bin/env -vS bash -x
+#!/usr/bin/env bash
 # ~/.local/bin/focus-dir
 # Usage: focus-dir right|left|up|down
 # GNOME (Xorg) directional focus + mouse-center without relying on extension hotkeys.
